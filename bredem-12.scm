@@ -1,6 +1,23 @@
-(use-modules (srfi srfi-1)
-             (srfi srfi-8)
+(use-modules ((rnrs) :version (6))
              (srfi srfi-9))
+
+#|
+This single file contains a monolithic implementation of BREDEM 2012
+The specification document used should be in the repository
+
+For total unambiguous traceability, here is its checksum:
+
+file name: BREDEM-2012-specification.pdf
+   md5sum: 10b15c890525dcb0557a0a57c7d5b8a1
+
+If you can edit this using emacs, then outline-minor-mode and outshine
+will help. The code is almost exactly mappable to the table of
+contents of the BREDEM document, except where the document contains
+forward references.
+|#
+
+;; * 0 - Some definitions
+;; ** The calendar
 
 (define months
   '((1 31 january)
@@ -16,6 +33,10 @@
     (11 30 november)
     (12 31 december)))
 
+(define (month-number month) (car month))
+(define (month-days month)   (cadr month))
+(define (month-name month)   (caddr month))
+
 (define pi 3.14159265358979323846264338328)
 
 (define (distribute-monthly amount)
@@ -24,10 +45,6 @@ days in each of the 12 months."
   (map (lambda (month)
          (* amount (/ (cadr month) 365.0)))
        months))
-
-;; each part of this should directly map to BREDEM 2012
-;; md5sum:
-;; 10b15c890525dcb0557a0a57c7d5b8a1  BREDEM-2012-specification.pdf
 
 ;; * 1 - appliances and lighting
 ;; ** Seasonal wave
@@ -40,13 +57,11 @@ by the following cosine function
 (define (seasonal-wave amplitude phase)
   (map
    (lambda (m)
-     (let ([num (car m)]
-           [days (cadr m)])
-       (* (/ days 365.0)
-          (+ 1 (* amplitude
-                  (cos
-                   (* 2 pi
-                      (/ (- num phase) 12)))))))
+     (* (/ (month-days m) 365.0)
+        (+ 1 (* amplitude
+                (cos
+                 (* 2 pi
+                    (/ (- (month-number m) phase) 12))))))
      )
    months
    ))
@@ -70,10 +85,11 @@ by the following cosine function
 ;; ** Lighting energy consumption (p6)
 ;; *** Definition of windows
 
+;; SRFI-9 definition
 (define-record-type window
   (make-window area gl fr zl)
   window?
-  (area window-are)
+  (area window-area)
   (gl window-gl)
   (fr window-fr)
   (zl window-zl))
@@ -215,7 +231,26 @@ range-power-or-type is either electric, another fuel, or a number in watts"
       (map + ECm ERm)
       )))
 
-;; * 2- Energy required to heat water (p8)
+;; * 2 - Energy required to heat water (p8)
+
+;; ** 2.0 - System description
+
+;; TODO define record type is annoying - make shorter one with syntax rule.
+(define-record-type water-heating-system
+  (make-water-heating-system
+   type                                 ; broadly what type is it
+   store-type                           ; what kind of store does it have
+   store-volume
+   store-insulation                     ; what kind of insulation does it have
+   store-insulation-thickness           ; how much
+   declared-loss
+   cylinder-stat
+   heat-timer
+   store-timer
+   store-in-cupboard
+   keep-hot-facility
+   ))
+
 ;; ** 2.1 - The volume and energy content of heated water (p8)
 
 (define (table-6 shower-type)
@@ -256,7 +291,7 @@ shower-type is #f for no shower, or per table-6 above.
 showers-per-day is #f or number of showers per day.
 baths-per-day is #f or num. baths per day.
 volume-per-shower is #f or the volume per shower."
-  (let (;; A
+  (let* (;; A
         [Nshower (or showers-per-day (+ 0.65 (* 0.45 N)))]
         [Vps (or volume-per-shower (table-6 shower-type))]
         ;; B
@@ -274,9 +309,11 @@ volume-per-shower is #f or the volume per shower."
         [Vd,ave (+ Vd,shower Vd,bath Vd,other)]
         ;; G
         [Vd,m (map (lambda (x) (* x Vd,ave)) table-7)])
-    ;; H
+    ;; H - convert vd into a monthly figure; this is the daily amount
+    ;; times number of days in the month times delta t for the month
+    ;; converted to kWh
     (map (lambda (month Vd deltaT)
-           (/ (* 4.18 Vd (cadr month) deltaT) 3600))
+           (/ (* 4.18 Vd (month-days month) deltaT) 3600))
          months
          Vd,m
          table-8)
@@ -284,15 +321,190 @@ volume-per-shower is #f or the volume per shower."
 
 ;; ** 2.2 - Water heating system losses (p9)
 
-;; * Entire calculation
+(define (table-9
+         type-of-storage
+         type-of-system
+         Vc                             ; store volume
+         declared-loss
+         cylinder-thermostat
+         hot-water-timer
+         store-timer
+         airing-cupboard)
+  "page 10; storage temperature factor.
+Naturally this is not a table, but an algorithm.
+No idea why it goes in a table.
 
-(define (bredem-12 ...)
-  (let* ([N (or N (estimated-occupancy TFA))]
-         [Elm (lighting-requirement TFA N L% windows)]
-         [Eam (appliance-requirement TFA N)]
-         [Epf (pump-and-fan-requirement ???)]
+The table contains NA in the two marked rows; this function
+returns 1 in these cases.
+"
+  (if (community-system? type-of-system)
+      1.0
+      (case type-of-storage
+        ((cylinder-immersion) 0.6)
+
+        ((combi-close-coupled cylinder-indirect)
+         (* 0.6
+            ;; a) multiply by 1.3 if no cylinder stat
+            (if cylinder-thermostat 1 1.3)
+            ;; b) multiply by 0.9 if separate timer
+            (if hot-water-timer 0.9 1)))
+
+        ((combi-primary)
+         (if declared-loss
+             1.0 ;NA
+             (+ 2.54 (* 0.00682 (max 0 (- 115 Vc))))))
+
+        ((combi-secondary)
+         (if declared-loss
+             1.0 ;NA
+             (+ 1.68 (* 0.00496 (max 0 (- 115 Vc))))))
+
+        ((hot-water-only-thermal-store integrated-store-gas-fire-cpsu)
+         (* (if declared-loss 0.89 1.08)
+
+            ;; c) multiply by 0.81 if thermal store has separate tiimer
+            (if store-timer 0.81 1)
+            ;; d) multiply by 1.1 if not in airing cupboard
+            (if airing-cupboard 1 1.1)))
+
+        ((electric-cpsu)                   ; NOTE using default of 85 deg.
+         (if declared-loss 1.09 1.0))
+        )))
+
+(define (table-10 pipework-insulation type-of-system)
+  "p10 - table 10 - primary pipework insulated"
+  (if (community-system? type-of-system)
+      1.0                               ; this is a footnote to table 11. good work someone.
+      (case pipework-insulation
+        ((uninsulated) 0.0)
+        ((first-meter) 0.1)
+        ((all-accessible) 0.3)
+        ((fully-insulated) 1.0))))
+
+(define (table-11 cylinder-stat separately-timed type-of-system)
+  "p10 - table 11- hours per day PP is hot"
+  (cond
+   ;;                                    *  *  *  *
+   ;;                     J  F  M  A  M  J  J  A  S  O  N  D
+   ((community-system? type-of-system)
+                        '(3  3  3  3  3  3  3  3  3  3  3  3))
+   ((not cylinder-stat) '(11 11 11 11 11 3  3  3  3  11 11 11))
+   (separately-timed    '(5  5  5  5  5  3  3  3  3  5  5  5))
+   (t                   '(3  3  3  3  3  3  3  3  3  3  3  3))))
+
+(define (table-12 solar-water-heating)
+  "p10 - table 12 - primary circuit loss adjustment factors with solar water heating"
+  (if solar-water-heating
+      (make-list 12 1.0)
+      '(1.0 1.0 0.94 0.7 0.45 0.44 0.44 0.48 0.76 0.94 1.0 1.0)))
+
+;; *** TODO table 13 is missing
+
+(define (table-13)
+  "p11 - table 13 - combination boiler loss equations
+Why is this a table? it's not a table.
+To start with it's going to be twelve zeroes."
+  ;; TODO handle type of system properly
+  (make-list 12 0.0))
+
+
+(define (hot-water-system-losses
+         QHW,m                          ; monthly energy content of
+                                        ; hot water, per
+                                        ; hot-water-requirement above
+
+         central-water-heating          ; #t or #f
+         Qst,man                        ; manuf. declared loss or #f
+         STF                            ; storage temp factor or #f
+
+         ;; inputs needed for table 9, if stf omitted:
+         type-of-system                 ; a type of heating system
+         type-of-storage
+         Vc
+         cylinder-thermostat
+         hot-water-timer
+         store-timer
+         airing-cupboard
+
+         cylinder-insulation-type
+         t                              ; cylinder insulation thickness
+
+         solar-water-heating            ; do we have solar water heating
          )
+  "p9
+QHW,m should be computed by using hot-water-requirement."
 
+  (let* (;; compute storage-temperature-factor if omitted
+         ;; using table 9
+         [STF (or STF (table-9
+                       type-of-storage
+                       type-of-system
+                       Vc
+                       Qst,man
+                       cylinder-thermostat
+                       hot-water-timer
+                       store-timer
+                       airing-cupboard))]
 
-    )
-  )
+         ;; compute solar adjustment factor
+         [fpa,m (if (and cylinder-thermostat
+                         solar-water-heating)
+                    table-12
+                    (make-list 12 1.0))]
+
+         ;; compute hours per day primary hot
+         [hpp,m (table-11 cylinder-thermostat
+                          hot-water-timed
+                          type-of-system)]
+
+         ;; compute fraction of primary pipework insulated
+         [fpp (table-10 pipework-insulation type-of-system)]
+
+         ;; A
+         [QD,m (if central-water-heating
+                   (* 0.15 QHW,m)
+                   0)]
+         ;; B
+         [Qst,d (if Qst,man
+                    (* Qst,man STF)
+                    (let (;; a.
+                          [L (case cylinder-insulation-type
+                               ((mineral-wool) (+ 0.005 (/ 1.76 (+ t 12.8))))
+                               ((factory-foam) (+ 0.005 (/ 0.55 (+ t 4.0))))
+                               ((electric-cpsu) 0.022))]
+                          ;; b.
+                          [Vf (expt (/ 120 Vc) 0.3333)])
+                      ;; c.
+                      (* L Vc Vf STF)))]
+         ;; C
+         [Qst,m (map (lambda (m) (* Qst,d (month-days m))) months)]
+
+         ;; D
+         [QP,m (map (lambda (m fpa hpp)
+                      (* (month-days m)
+                         14.0
+                         fpa
+                         (* hpp
+                            (+ 0.0263
+                               (+ (* 0.0091 fpp)
+                                  (* 0.0245 (- 1 fpp)))))
+                         ))
+                    months fpa,m hpp,m)]
+         ;;E
+         [Qcom,m (table-13 type-of-system)])
+    (values QP,m Qcom,m)))
+
+;; ** TODO 2.3 - Energy required for electric showers (p11)
+;; ** TODO 2.4 - Hot water from solar water heating systems
+;; *** TODO 2.4.1 - Calculating the solar energy incident on a solar collector
+;; *** TODO 2.4.2 - Calculating the heat output of a solar water heater
+;; ** TODO 2.5 - Net water heating energy requirement
+;; * TODO 3 - Heat Loss
+;; * TODO 4 - Thermal mass parameter
+;; * TODO 5 - Solar heat gain
+;; * TODO 6 - Internal heat gain and total heat gain
+;; * TODO 7 - Mean internal temperature
+;; * TODO 8 - Space heating energy requirement
+;; * TODO 9 - Cooling energy requirement
+;; * TODO 10 - PV and wind turbines
+;; * TODO 11 - Combining outputs
