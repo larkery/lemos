@@ -1,6 +1,3 @@
-(use-modules ((rnrs) :version (6))
-             (srfi srfi-9))
-
 #|
 This single file contains a monolithic implementation of BREDEM 2012
 The specification document used should be in the repository
@@ -14,9 +11,17 @@ If you can edit this using emacs, then outline-minor-mode and outshine
 will help. The code is almost exactly mappable to the table of
 contents of the BREDEM document, except where the document contains
 forward references.
+
+The code is written in scheme, a programming language designed for
+teaching. Scheme's basic syntax is quite similar to that for the NHM;
+however, the meaning of particular procedures is somewhat different.
 |#
 
+(use-modules ((rnrs) :version (6))
+             (srfi srfi-26))
+
 ;; * 0 - Some definitions
+
 ;; ** The calendar
 
 (define months
@@ -83,16 +88,6 @@ by the following cosine function
       1))
 
 ;; ** Lighting energy consumption (p6)
-;; *** Definition of windows
-
-;; SRFI-9 definition
-(define-record-type window
-  (make-window area gl fr zl)
-  window?
-  (area window-area)
-  (gl window-gl)
-  (fr window-fr)
-  (zl window-zl))
 
 (define (table-1 glazing)
   "Table 1, as a function. Page 6.
@@ -145,7 +140,7 @@ windows is a list of objects representing windows."
                   + (map
                      (lambda (window)
                        (* 0.9
-                          (window-area window)
+                          (element-area window)
                           (window-gl window)
                           (window-fr window)
                           (window-zl window)))
@@ -174,7 +169,7 @@ TFA is the total floor area and N the occupancy."
   (let* (;;I
          [Ea (* 184.4 (expt (* TFA N) 0.4174))])
     ;; J
-    (map (lambda (x) (* x Ea)) Ea-monthly)))
+    (map (cut * <> Ea) Ea-monthly)))
 
 (define (pump-and-fan-requirement ...)
   "Haven't done this yet.
@@ -407,7 +402,6 @@ To start with it's going to be twelve zeroes."
   ;; TODO handle type of system properly
   (make-list 12 0.0))
 
-
 (define (hot-water-system-losses
          QHW,m                          ; monthly energy content of
                                         ; hot water, per
@@ -500,6 +494,141 @@ QHW,m should be computed by using hot-water-requirement."
 ;; *** TODO 2.4.2 - Calculating the heat output of a solar water heater
 ;; ** TODO 2.5 - Net water heating energy requirement
 ;; * TODO 3 - Heat Loss
+
+(define (fabric-heat-loss
+         fabric
+         element-u-value   ; a function to get the u-value of an
+                           ; element, e.g. a sap u-values function.
+         y                    ; a thermal bridge factor, or #f and we
+                              ; will guess per footnote on p16
+         )
+  "p17 - fabric heat loss"
+  (let* (;; p16 footnote
+         [build-year (fabric-build-year fabric)]
+         [thermal-bridges (fabric-thermal-bridges fabric)]
+         [external-elements (fabric-elements fabric)]
+
+         ;; determine y if not supplied
+         [y (or y (cond
+                   ((< build-year 2002) 0.15)
+                   ((< build-year 2006) 0.11)
+                   (t 0.08)))]
+         ;; A.
+         [Htb (if thermal-bridges
+                  (apply + (map (lambda (bridge)
+                                  (* (bridge-length bridge)
+                                     (bridge-psi bridge)))
+                                thermal-bridges))
+                  (* y (apply + (map element-area external-elements))))]
+         [surface-loss (apply + (map (lambda (element)
+                                       (* (element-area element)
+                                          (element-u-value element)))
+                                        ; the u-value adjustment for
+                                        ; curtains is found within
+                                        ; element-u-value
+                                     external-elements))])
+    ;; B.
+    (+ surface-loss Htb)))
+
+(define (table-19 fabric)
+  "p18 - table 19 - fabric structural infiltration"
+  ;; take an area-weighted average where more than one category applies
+  (+ (* (fabric-storeys fabric) 0.1)    ; stack effect
+     ;; TODO area weighted average for walls
+     ;; TODO floor type (not sure what that really means)
+     ;; TODO unsealed loft hatch
+     ;; windows and doors, area weighted avg.
+     ;; draught lobby on main door.
+   )
+  )
+
+(define (table-20 fabric)
+  "p18 - table 20 - a function of building fabric which calculates ventilation in m3/hr"
+  (+ (* 40.0 (fabric-chimneys fabric))
+     (* 20.0 (fabric-open-flues fabric))
+     (* 10.0 (fabric-intermittent-fans fabric))
+     (* 10.0 (fabric-passive-vents fabric))
+     (* 40.0 (fabric-flueless-gas-fires fabric))))
+
+(define (table-21 fabric)
+  "p18 - table 21 - site exposure factor"
+  (case (fabric-site-exposure fabric)
+    ((exposed) 1.1)
+    ((above-average) 1.05)
+    ((average) 1)
+    ((below-average) 0.95)
+    ((sheltered) 0.9)))
+
+(define (table-22 fabric)
+  "p19 - table 22 - dwelling exposure factor"
+  (case (fabric-exposed-sides fabric)
+    ((4) 1)
+    ((3) 0.925)
+    ((2) 0.85)
+    ((1) 0.775)
+    ((0) 0.7)))
+
+(define (ventilation-heat-loss
+         fabric
+         wind-speed)          ;vreg,m on p16 - really table A3, appendix A
+  "p17 - ventilation heat loss"
+  (let* ([Fdv (table-20 fabric)]
+         ;; C.
+         [Vt (fabric-volume fabric)]
+         [Ldv (/ Fdv Vt)]
+         ;; D.
+         [Q50 (fabric-Q50 fabric)]
+         [Lfab (if Q50
+                   (/ Q50 20)
+                   (table-19 fabric))]
+         ;; E.
+         [She (table-21 fabric)]                          ;site exposure factor
+         [Shd (table-22 fabric)]                          ;dwelling exposure factor
+         [mystery-factor (/ (* (+ Lfab Ldv) She Shd) 4)]
+         [Lsub,m (map (lambda (vreg) (* vreg mystery-factor)) wind-speed)]
+         ;; F.
+         [Lv,m
+          (map
+           (case (fabric-ventilation-type)
+            ((natural positive-from-loft)
+             (lambda (Lsub) (if (>= Lsub 1)
+                                Lsub
+                                (+ 0.5 (/ (expt Lsub 2) 2)))))
+
+            ((mechanical-no-hr)
+             (lambda (Lsub) (+ 0.5 Lsub)))
+
+            ((mechanical-with-hr)
+             ;; ASSUMPTION: no test data for MVHR available; using
+             ;; default efficiency of 60% which goes into the 0.4
+             ;; below (it is (1 - 60%))
+             (lambda (Lsub) (+ Lsub (* 0.5 0.4))))
+
+            ((mechanical-extract positive-from-outside)
+             (lambda (Lsub) (if (< Lsub 0.25) 0.5 (+ Lsub 0.25)))))
+
+           Lsub,m)])
+    ;; G is the output of this part
+    (map (lambda (Lv) (* 0.33 Lv Vt)) Lv,m)))
+
+(define (heat-losses fabric element-u-value y wind-speed)
+  "p17 - Heat transfer coefficients and heat loss parameter.
+Returns H,m, HLP,m and H3."
+  (let* ([Hf   (fabric-heat-loss fabric element-u-value y)]
+         [Hv,m (ventilation-heat-loss fabric wind-speed)]
+         ;; add them up per month
+         ;; H.
+         [H,m (map + Hv,m (make-list 12 Hf))]
+         ;; I.
+         [TFA (fabric-floor-area fabric)]
+         [HLP,m (map (lambda (H) (/ H TFA)))]
+         ;; J.
+         ;; TODO all kinds of waffle about zones and stairs
+         [H3 1])
+    ;; this part returns multiple values
+    (values H,m HLP,m H3)
+    ))
+
 ;; * TODO 4 - Thermal mass parameter
 ;; * TODO 5 - Solar heat gain
 ;; * TODO 6 - Internal heat gain and total heat gain
