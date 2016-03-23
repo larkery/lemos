@@ -10,7 +10,17 @@ file name: BREDEM-2012-specification.pdf
 If you can edit this using emacs, then outline-minor-mode and outshine
 will help. The code is almost exactly mappable to the table of
 contents of the BREDEM document, except where the document contains
-forward references.
+forward references or is thoroughly non-programmish.
+
+All tables have been converted either into constants or functions named
+table-n.
+
+Major parts of the calculation are functions. These expect to operate
+on types for which certain other functions or methods are defined,
+which are detailed in S6RS record-type format in the adjacent
+r6rs-house.scm; however, you could just as well use another set of
+functions (in my imagination, in kawa scheme this could correspond to
+some other java class for java interop).
 
 The code is written in scheme, a programming language designed for
 teaching. Scheme's basic syntax is quite similar to that for the NHM;
